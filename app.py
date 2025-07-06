@@ -13,14 +13,26 @@ import networkx as nx
 import itertools
 import pathlib
 
-DATA_PATH = pathlib.Path(__file__).parent /"vaporiq_data.csv"
+# Look for vaporiq_data.csv **next to** app.py
+DATA_PATH = pathlib.Path(__file__).with_name("vaporiq_data.csv")
 
 @st.cache_data
-def load_data():
-    df = pd.read_csv(DATA_PATH)
-    # Basic cleaning: strip spaces in column names
-    df.columns = df.columns.str.strip()
-    return df
+def load_data() -> pd.DataFrame:
+    """Read the survey CSV, or prompt upload if it’s absent."""
+    if DATA_PATH.exists():
+        return pd.read_csv(DATA_PATH)
+
+    # Friendly fallback—let the user upload the file
+    st.warning(
+        f"⚠️ Couldn’t find {DATA_PATH.name}. "
+        "Upload the CSV manually and I’ll use that copy."
+    )
+    uploaded = st.file_uploader("Upload vaporiq_data.csv", type="csv")
+    if uploaded is not None:
+        return pd.read_csv(uploaded)
+
+    # Stop the app until a file is provided
+    st.stop()
 
 df = load_data()
 
