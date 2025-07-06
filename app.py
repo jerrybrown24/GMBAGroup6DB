@@ -13,7 +13,7 @@ import networkx as nx
 import itertools
 import pathlib
 
-DATA_PATH = pathlib.Path(__file__).parent / "data" / "vaporiq_data.csv"
+DATA_PATH = pathlib.Path(__file__).parent /"vaporiq_data.csv"
 
 @st.cache_data
 def load_data():
