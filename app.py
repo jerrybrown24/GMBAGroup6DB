@@ -1,233 +1,281 @@
-# app.py ────────────────────────────────────────────────────────────
-import streamlit as st
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.linear_model import ElasticNet, LogisticRegression
+# ───────── VaporIQ Dashboard • v8 (New Dataset) ─────────
+# Compatible with: vaporiq_synthetic.csv (44 cols) & flavor_trends_user_based.csv
+# Tabs: Data Visualization, TasteDNA, Forecasting, Micro-Batch
+# Added:
+#  • Richer core feature set leveraging additional survey columns
+#  • Model target updated to SubscribeIntent (current_vape_subscription)
+#  • Feature‑importance visual for tree‑based models
+#  • Visuals updated to use new numeric preference columns
+# --------------------------------------------------------
+
+import streamlit as st, pandas as pd, numpy as np, matplotlib.pyplot as plt, seaborn as sns, plotly.express as px
+from pathlib import Path
+import base64, textwrap, warnings
+
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-import umap
-import plotly.express as px
+from sklearn.metrics import (silhouette_score, confusion_matrix, f1_score,
+                             precision_score, recall_score, accuracy_score,
+                             roc_curve, auc, r2_score, mean_squared_error)
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from mlxtend.frequent_patterns import apriori, association_rules
-import pathlib
 
-# ───────────────────────────────────────────────────────────────────
-# CONFIG & DATA LOADING
-# ───────────────────────────────────────────────────────────────────
-DATA_PATH = pathlib.Path(__file__).with_name("vaporiq_data.csv")
+warnings.filterwarnings("ignore")
 
-NUMERIC_COLS_TO_CLEAN = [
-    "willingness_to_pay_usd",
-    "monthly_spend_usd",
-    "weekly_consumption_ml",
-    "nicotine_strength_mgml",
-    "age",
+# ─────────────────────  Page & Gradient  ─────────────────────
+st.set_page_config(page_title="VaporIQ Galaxy", layout="wide")
+with open("style.css") as css:
+    st.markdown(f"<style>{css.read()}</style>", unsafe_allow_html=True)
+
+# ─────────  Galaxy star‑field (body::before)  ─────────
+star_path = Path(__file__).with_name("starfield.png")
+if star_path.exists():
+    star_b64 = base64.b64encode(star_path.read_bytes()).decode()
+    st.markdown(textwrap.dedent(f"""
+        <style>
+        body::before {{
+            content:"";
+            position:fixed; inset:0; z-index:-4;
+            pointer-events:none;
+            background:url("data:image/png;base64,{star_b64}") repeat;
+            background-size:600px;
+            opacity:.35;
+            animation:starDrift 240s linear infinite;
+        }}
+        @keyframes starDrift {{
+          0%   {{transform:translate3d(0,0,0);}}
+          100% {{transform:translate3d(-2000px,1500px,0);}}
+        }}
+        .smoke-layer    {{animation:smokeFlow 210s linear infinite;  opacity:.25;}}
+        .smoke-layer-2  {{animation:smokeFlowR 280s linear infinite; opacity:.15;}}
+        @keyframes smokeFlow  {{0%{{background-position:0 0}} 100%{{background-position:1600px 0}}}}
+        @keyframes smokeFlowR {{0%{{background-position:0 0}} 100%{{background-position:-1600px 0}}}}
+        </style>
+    """), unsafe_allow_html=True)
+else:
+    st.sidebar.error("⚠️ `starfield.png` not found – galaxy backdrop disabled.")
+
+# Inject smoke divs
+st.markdown('<div class="smoke-layer"></div>',  unsafe_allow_html=True)
+st.markdown('<div class="smoke-layer-2"></div>',unsafe_allow_html=True)
+
+# ─────────  Watermark bottle  ─────────
+wm_path = Path(__file__).with_name("vape_watermark.png")
+if wm_path.exists():
+    with open(wm_path,"rb") as f:
+        wm_b64 = base64.b64encode(f.read()).decode()
+    st.markdown(f"<img src='data:image/png;base64,{wm_b64}' style='position:fixed;bottom:15px;right:15px;width:110px;opacity:.8;z-index:1;'/>",
+                unsafe_allow_html=True)
+
+# ─────────────────────  Data  ─────────────────────
+@st.cache_data
+def load_data():
+    users = pd.read_csv("vaporiq_synthetic.csv")  # renamed upload
+    trends = pd.read_csv("flavor_trends_user_based.csv")
+
+    # Harmonise column names with legacy code
+    rename_map = {
+        "age": "Age",
+        "gender": "Gender",
+        "weekly_consumption_ml": "PodsPerWeek",
+        "fav_flavor_categories_ranked": "FlavourFamilies",
+        "current_vape_subscription": "SubscribeIntent"
+    }
+    users = users.rename(columns=rename_map)
+
+    # Ensure binary target (1=subscribed/likely, 0 otherwise)
+    if users["SubscribeIntent"].dtype == object:
+        users["SubscribeIntent"] = users["SubscribeIntent"].map({"Yes": 1, "No": 0})
+
+    return users, trends
+
+users_df, trends_df = load_data()
+
+# Expanded core feature set for modelling
+core = [
+    "Age", "years_vaping", "PodsPerWeek", "nicotine_strength_mgml",
+    "openness_new_flavors", "value_exclusivity", "flavor_boredom",
+    "monthly_spend_usd", "preferred_box_size_pods", "interest_gamification_points",
+    "overall_interest_nps"
 ]
 
-def _clean_numeric(series: pd.Series) -> pd.Series:
-    """Strip non-numeric characters and convert to float."""
-    cleaned = (
-        series.astype(str)
-              .str.replace(r"[^0-9.\-]", "", regex=True)   # drop $, commas, text
-    )
-    return pd.to_numeric(cleaned, errors="coerce")
+num_core = [c for c in core if c in users_df.columns]
+users_df[num_core] = users_df[num_core].apply(pd.to_numeric, errors="coerce")
 
-@st.cache_data
-def load_data() -> pd.DataFrame:
-    """Load CSV from disk or user upload; return a cleaned DataFrame."""
-    if DATA_PATH.exists():
-        df = pd.read_csv(DATA_PATH)
+# ─────────────────────  Tabs  ─────────────────────
+viz, taste_tab, forecast_tab, rules_tab = st.tabs(
+    ["Data Visualization", "TasteDNA", "Forecasting", "Micro-Batch"]
+)
+
+# =================== 1. Data‑Viz TAB ===================
+with viz:
+    st.header("📊 Data Visualization Explorer")
+
+    genders = st.sidebar.multiselect("Gender filter",
+                 users_df["Gender"].unique().tolist(),
+                 default=users_df["Gender"].unique().tolist())
+    df = users_df[users_df["Gender"].isin(genders)]
+
+    if df.empty:
+        st.warning("No rows match current filters — tweak sidebar options.")
+        st.stop()
+
+    # 1 Density heatmap Age vs Pods
+    hex_fig = px.density_heatmap(
+        df, x="Age", y="PodsPerWeek",
+        nbinsx=30, nbinsy=15,
+        color_continuous_scale="magma",
+        title="Density of Consumption by Age")
+    st.plotly_chart(hex_fig, use_container_width=True)
+
+    # 2 Scatter Pods vs Age
+    fig, ax = plt.subplots(); sns.scatterplot(data=df, x="Age", y="PodsPerWeek", ax=ax, alpha=.6)
+    st.pyplot(fig); plt.close(fig)
+
+    # 3 Correlation heat‑map (selected numeric columns)
+    corr_cols = ["Age", "PodsPerWeek", "nicotine_strength_mgml", "monthly_spend_usd"]
+    corr_df = df[corr_cols].corr()
+    fig, ax = plt.subplots(); sns.heatmap(corr_df, annot=True, cmap="coolwarm", ax=ax)
+    st.pyplot(fig); plt.close(fig)
+
+    # 4 Bar: flavour family counts
+    flat = df["FlavourFamilies"].str.get_dummies(sep=", ").sum().sort_values(ascending=False)
+    st.bar_chart(flat)
+
+    # 5 Top‑3 flavour trends (user‑based)
+    top3 = trends_df.drop(columns="Date").mean().nlargest(3).index
+    st.plotly_chart(px.line(trends_df, x="Date", y=top3, title="Top‑3 Flavour Trends"),
+                    use_container_width=True)
+
+    # 6 Rugplots: openness & boredom
+    fig, ax = plt.subplots()
+    sns.rugplot(df["openness_new_flavors"], height=.1, color="g", ax=ax, label="Openness")
+    sns.rugplot(df["flavor_boredom"], height=.1, color="r", ax=ax, label="Boredom")
+    ax.legend(); st.pyplot(fig); plt.close(fig)
+
+    with st.expander("Key Insights"):
+        dom_gender = df["Gender"].value_counts(normalize=True).idxmax()
+        fast_flav = trends_df.drop(columns="Date").mean().idxmax()
+        st.markdown(f"- Dominant gender in current filters: **{dom_gender}**")
+        st.markdown(f"- Most mentioned flavour family overall: **{fast_flav}**")
+        st.markdown("- Data derived from 7 000 synthetic survey rows + 120‑week user‑based trend signal.")
+
+# =================== 2. TasteDNA TAB ===================
+with taste_tab:
+    st.header("🔮 TasteDNA Engine")
+    m_mode = st.radio("Mode", ["Classification", "Clustering"], horizontal=True)
+
+    if m_mode == "Classification":
+        algo = st.selectbox("Classifier", ["KNN", "Decision Tree", "Random Forest", "Gradient Boosting"])
+        tune = st.checkbox("GridSearch (5‑fold F1)", False)
+
+        X, y = users_df[num_core].fillna(0), users_df["SubscribeIntent"].astype(int)
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=.25, stratify=y, random_state=42)
+
+        base = {"KNN": KNeighborsClassifier(),
+                "Decision Tree": DecisionTreeClassifier(random_state=42),
+                "Random Forest": RandomForestClassifier(n_estimators=300, random_state=42),
+                "Gradient Boosting": GradientBoostingClassifier(random_state=42)}[algo]
+
+        grid = {"KNN": {"n_neighbors": [3, 5, 7], "weights": ["uniform", "distance"]},
+                "Decision Tree": {"max_depth": [None, 5, 10]},
+                "Random Forest": {"n_estimators": [200, 300, 400], "max_depth": [None, 10]},
+                "Gradient Boosting": {"n_estimators": [200, 300], "learning_rate": [0.05, 0.1]}}[algo]
+
+        if tune:
+            gs = GridSearchCV(base, grid, scoring="f1", cv=5, n_jobs=-1).fit(X_tr, y_tr)
+            model, best = gs.best_estimator_, gs.best_params_
+        else:
+            model, best = base.fit(X_tr, y_tr), None
+
+        y_pred = model.predict(X_te)
+        prec, rec = precision_score(y_te, y_pred), recall_score(y_te, y_pred)
+        acc, f1 = accuracy_score(y_te, y_pred), f1_score(y_te, y_pred)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Precision", f"{prec:.2f}")
+        m2.metric("Recall",   f"{rec:.2f}")
+        m3.metric("Accuracy", f"{acc:.2f}")
+        m4.metric("F1",       f"{f1:.2f}")
+
+        fig, ax = plt.subplots(); sns.heatmap(confusion_matrix(y_te, y_pred), annot=True, fmt="d", cmap="Blues", ax=ax)
+        st.pyplot(fig); plt.close(fig)
+
+        # Feature importance for tree‑based models
+        if hasattr(model, "feature_importances_"):
+            imp = pd.Series(model.feature_importances_, index=num_core).sort_values(ascending=False)[:10]
+            fig_imp, ax_imp = plt.subplots(); sns.barplot(x=imp.values, y=imp.index, ax=ax_imp)
+            ax_imp.set_title("Top Feature Importances"); st.pyplot(fig_imp); plt.close(fig_imp)
+
+        with st.expander("Key Insights"):
+            if best: st.markdown(f"- GridSearch best params: `{best}`")
+            st.markdown(f"- Precision {prec:.2f}, Recall {rec:.2f}, F1 {f1:.2f}")
+
+    else:  # Clustering
+        k = st.slider("k clusters", 2, 10, 4)
+        X_scaled = MinMaxScaler().fit_transform(users_df[num_core].fillna(0))
+        km = KMeans(k, random_state=42, n_init="auto").fit(X_scaled)
+        sil = silhouette_score(X_scaled, km.labels_)
+        users_df["Cluster"] = km.labels_
+        st.metric("Silhouette", f"{sil:.3f}")
+        st.dataframe(users_df.groupby("Cluster")[num_core].mean().round(2))
+
+# =================== 3. Forecast TAB ===================
+with forecast_tab:
+    st.header("📈 Forecasting")
+    flavour = st.selectbox("Flavour signal", trends_df.columns[1:])
+    reg_name = st.selectbox("Regressor", ["Linear", "Ridge", "Lasso", "Decision Tree"])
+    reg_map = {"Linear": LinearRegression(),
+               "Ridge": Ridge(alpha=1.0),
+               "Lasso": Lasso(alpha=0.01),
+               "Decision Tree": DecisionTreeRegressor(max_depth=5, random_state=42)}
+    reg = reg_map[reg_name]
+
+    X = np.arange(len(trends_df)).reshape(-1, 1); y = trends_df[flavour].values
+    split = int(.8 * len(X)); reg.fit(X[:split], y[:split]); y_pred = reg.predict(X[split:])
+    r2 = r2_score(y[split:], y_pred); rmse = np.sqrt(mean_squared_error(y[split:], y_pred))
+
+    st.metric("R²", f"{r2:.3f}"); st.metric("RMSE", f"{rmse:.2f}")
+
+    fig, ax = plt.subplots()
+    ax.scatter(y[split:], y_pred, alpha=.6)
+    ax.plot([y.min(), y.max()], [y.min(), y.max()], 'k--')
+    ax.set_xlabel("Actual Mentions"); ax.set_ylabel("Predicted Mentions")
+    st.pyplot(fig); plt.close(fig)
+
+    with st.expander("Key Insights"):
+        slopes = {c: np.polyfit(np.arange(len(trends_df)), trends_df[c], 1)[0] for c in trends_df.columns[1:]}
+        st.markdown(f"- Regressor **{reg_name}** → R² {r2:.2f}, RMSE {rmse:.2f}")
+        st.markdown(f"- Steepest flavour slope: **{max(slopes, key=slopes.get)}**")
+
+# =================== 4. Apriori TAB ===================
+with rules_tab:
+    st.header("🧩 Apriori Explorer")
+    sup = st.slider("Support", 0.01, 0.4, 0.05, 0.01); conf = st.slider("Confidence", 0.05, 1.0, 0.3, 0.05)
+
+    basket = users_df["FlavourFamilies"].str.get_dummies(sep=", ").astype(bool)
+    basket = pd.concat([
+        basket,
+        pd.get_dummies(users_df["device_type"], prefix="Dev", dtype=bool),
+        pd.get_dummies(users_df["Gender"], prefix="Gen", dtype=bool)
+    ], axis=1)
+
+    freq = apriori(basket, min_support=sup, use_colnames=True)
+    rules = association_rules(freq, metric="confidence", min_threshold=conf)
+
+    if rules.empty:
+        st.warning("No rules under thresholds.")
+        best = None
     else:
-        st.warning(
-            f"⚠️  Couldn’t find **{DATA_PATH.name}** next to *app.py*."
-            " Upload it manually and I’ll use that copy."
-        )
-        uploaded = st.file_uploader("Upload vaporiq_data.csv", type="csv")
-        if uploaded is None:
-            st.stop()
-        df = pd.read_csv(uploaded)
+        rules = rules.sort_values("confidence", ascending=False).head(10)
+        st.dataframe(rules)
+        best = rules.iloc[0]
 
-    df.columns = df.columns.str.strip()          # remove stray spaces
-
-    # Clean numeric-as-text columns
-    for col in NUMERIC_COLS_TO_CLEAN:
-        if col in df.columns:
-            df[col] = _clean_numeric(df[col])
-
-    return df
-
-df = load_data()
-
-# ───────────────────────────────────────────────────────────────────
-# STREAMLIT LAYOUT
-# ───────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="VaporIQ Dashboard", layout="wide")
-st.title("🚀 VaporIQ – Hyper-Personalized Vape Subscription Intelligence")
-
-tabs = st.tabs([
-    "Personal Pricing",
-    "Segment Explorer",
-    "Flavor & Mood",
-    "Churn & Referral",
-    "Data-Trust Console",
-    "Statistical Insights"
-])
-
-# ==================================================================
-# 1 · PERSONAL PRICING  (Regression)
-# ==================================================================
-with tabs[0]:
-    st.header("💸 Personal Pricing")
-
-    target = "willingness_to_pay_usd"
-    num_cols = ["age", "weekly_consumption_ml",
-                "nicotine_strength_mgml", "monthly_spend_usd"]
-    cat_cols = ["country", "device_type", "primary_vape_motivation"]
-
-    df_mod = df.dropna(subset=[target])
-    X, y = df_mod[num_cols + cat_cols], df_mod[target]
-
-    pre = ColumnTransformer([
-        ("num", StandardScaler(), num_cols),
-        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols)
-    ])
-    model = Pipeline([("pre", pre),
-                      ("reg", ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42))])
-    model.fit(X, y)
-
-    st.subheader("Predict a user’s price ceiling")
-    sample = {}
-    for c in num_cols:
-        sample[c] = st.number_input(
-            c, float(df[c].min()), float(df[c].max()), float(df[c].median()))
-    for c in cat_cols:
-        sample[c] = st.selectbox(c, sorted(df[c].dropna().unique()))
-
-    if st.button("Predict"):
-        pred = model.predict(pd.DataFrame([sample]))[0]
-        st.metric("Estimated willingness to pay (USD)", f"{pred:,.2f}")
-
-# ==================================================================
-# 2 · SEGMENT EXPLORER  (Clustering)
-# ==================================================================
-with tabs[1]:
-    st.header("🔍 Segment Explorer")
-
-    seg_cols = ["age", "weekly_consumption_ml",
-                "monthly_spend_usd", "willingness_to_pay_usd"]
-    numeric = df[seg_cols].fillna(df[seg_cols].median())
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(numeric)
-
-    reducer = umap.UMAP(random_state=42)
-    X_umap = reducer.fit_transform(X_scaled)
-
-    k = st.slider("Choose number of clusters", 2, 8, 4)
-    kmeans = KMeans(n_clusters=k, random_state=42, n_init="auto")
-    clusters = kmeans.fit_predict(X_scaled)
-    sil = silhouette_score(X_scaled, clusters)
-    st.write(f"Silhouette score: **{sil:.2f}**")
-
-    umap_df = pd.DataFrame(dict(UMAP1=X_umap[:, 0],
-                                UMAP2=X_umap[:, 1],
-                                cluster=clusters.astype(str)))
-    fig = px.scatter(umap_df, x="UMAP1", y="UMAP2",
-                     color="cluster", title="UMAP projection of user segments",
-                     height=600)
-    st.plotly_chart(fig, use_container_width=True)
-
-# ==================================================================
-# 3 · FLAVOR & MOOD  (Association Rules)
-# ==================================================================
-with tabs[2]:
-    st.header("🎨 Flavor & Mood Pairing")
-
-    flavor_lists = df["fav_flavor_categories_ranked"].fillna("").apply(
-        lambda x: [f.strip() for f in x.split(",") if f.strip()])
-    all_flavors = sorted({f for sub in flavor_lists for f in sub})
-    flavor_df = pd.DataFrame([
-        {flav: (flav in lst) for flav in all_flavors} for lst in flavor_lists
-    ])
-
-    freq_items = apriori(flavor_df, min_support=0.05, use_colnames=True)
-    rules = (association_rules(freq_items, metric="lift", min_threshold=1.0)
-             .sort_values("lift", ascending=False).head(20))
-
-    st.subheader("Top association rules (support ≥ 5 %)")
-    st.dataframe(rules[["antecedents", "consequents",
-                        "support", "confidence", "lift"]],
-                 use_container_width=True)
-
-# ==================================================================
-# 4 · CHURN & REFERRAL  (Classification)
-# ==================================================================
-with tabs[3]:
-    st.header("⚠️ Churn & Referral Radar")
-
-    churn_df = df.dropna(subset=["overall_interest_nps"]).copy()
-    churn_df["promoter"] = (churn_df["overall_interest_nps"] >= 9).astype(int)
-    features = ["interest_gamification_points", "likelihood_refer_friends",
-                "flavor_boredom", "freq_seek_recommendations"]
-    X = churn_df[features].fillna(0)
-    y = churn_df["promoter"]
-
-    clf = LogisticRegression(max_iter=500)
-    clf.fit(X, y)
-
-    st.subheader("Predict promoter probability")
-    user_input = {f: st.slider(f, 0, 10, 5) for f in features}
-    proba = clf.predict_proba(pd.DataFrame([user_input]))[0, 1]
-    st.metric("Promoter probability", f"{proba:.2%}")
-
-# ==================================================================
-# 5 · DATA-TRUST CONSOLE  (Clustering)
-# ==================================================================
-with tabs[4]:
-    st.header("🔒 Data-Trust Console")
-
-    trust_cols = ["comfort_sharing_data", "share_mood_data_comfort",
-                  "importance_data_control"]
-    trust_df = df[trust_cols].fillna(df[trust_cols].median())
-
-    scaler = StandardScaler()
-    trust_scaled = scaler.fit_transform(trust_df)
-
-    k_trust = 3
-    kmeans_trust = KMeans(n_clusters=k_trust, random_state=42, n_init="auto")
-    trust_labels = kmeans_trust.fit_predict(trust_scaled)
-    df["trust_tier"] = trust_labels
-
-    st.subheader("Distribution of trust tiers")
-    st.bar_chart(df["trust_tier"].value_counts().sort_index())
-    st.markdown("**Tier 0** = low trust • **Tier 1** = medium • **Tier 2** = high")
-
-# ==================================================================
-# 6 · STATISTICAL INSIGHTS  (Top-10 Charts)
-# ==================================================================
-with tabs[5]:
-    st.header("📊 Statistical Insights")
-
-    charts = [
-        px.histogram(df, x="age", nbins=20, title="Age distribution"),
-        px.scatter(df, x="monthly_spend_usd", y="willingness_to_pay_usd",
-                   trendline="ols", title="Monthly spend vs. willingness to pay"),
-        px.scatter(df, x="flavor_boredom", y="openness_new_flavors",
-                   title="Flavor boredom vs. openness"),
-        px.histogram(df, x="nicotine_strength_mgml",
-                     title="Nicotine strength (mg/ml)"),
-        px.pie(df, names="device_type", title="Device type split"),
-        px.histogram(df, x="weekly_consumption_ml",
-                     title="Weekly consumption (ml)"),
-        px.histogram(df, x="likelihood_refer_friends",
-                     title="Referral likelihood score"),
-        px.pie(df, names="self_report_mood_spectrum",
-               title="Self-reported mood spectrum"),
-        px.box(df, x="preferred_box_size_pods", y="monthly_spend_usd",
-               title="Monthly spend by preferred box size"),
-        px.histogram(df, x="peak_vape_time", title="Peak vape times"),
-    ]
-    for fig in charts:
-        st.plotly_chart(fig, use_container_width=True)
+    with st.expander("Key Insights"):
+        if best is not None:
+            st.markdown(f"- Best rule: {best['antecedents']} → {best['consequents']} (lift {best['lift']:.2f})")
+        st.markdown(f"- Support ≥ {sup:.2f}, Confidence ≥ {conf:.2f}")
