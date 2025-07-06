@@ -164,7 +164,7 @@ with viz:
         st.pyplot(fig);plt.close(fig)
         st.caption("Box‑and‑whisker shows spending dispersion by gender – pinpoints high‑value segments and outliers for VIP marketing.")
   
-   with st.expander("Key Insights & Rationale"):
+    with st.expander("Key Insights & Rationale"):
         dom_gender = df["Gender"].value_counts(normalize=True).idxmax()
         fast_flav = trends_df.drop(columns="Date").mean().idxmax()
         spend_gap = df.groupby("Gender")["monthly_spend_usd"].median().to_dict() if "monthly_spend_usd" in df.columns else {}
