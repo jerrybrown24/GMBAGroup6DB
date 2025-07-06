@@ -164,24 +164,15 @@ with viz:
         st.pyplot(fig);plt.close(fig)
         st.caption("Box‑and‑whisker shows spending dispersion by gender – pinpoints high‑value segments and outliers for VIP marketing.")
   
-    with st.expander("Key Insights & Rationale"):
-    dom_gender = df["Gender"].value_counts(normalize=True).idxmax()
-    top_flav   = trends_df.drop(columns="Date").mean().idxmax()
-    median_sp  = (
-        df.groupby("Gender")["monthly_spend_usd"].median()
-        if "monthly_spend_usd" in df.columns else None
-    )
-
-    st.markdown(f"• **Dominant gender:** {dom_gender}")
-    st.markdown(f"• **Hottest flavour family:** {top_flav}")
-
-    if median_sp is not None:
-        st.markdown(f"• **Median monthly spend (USD)** by gender: {median_sp.to_dict()}")
-
-    st.markdown(
-        "Box-plot exposes spend variability and outliers, guiding premium-tier "
-        "bundling and personalised discount thresholds."
-    )
+   with st.expander("Key Insights & Rationale"):
+        dom_gender = df["Gender"].value_counts(normalize=True).idxmax()
+        fast_flav = trends_df.drop(columns="Date").mean().idxmax()
+        spend_gap = df.groupby("Gender")["monthly_spend_usd"].median().to_dict() if "monthly_spend_usd" in df.columns else {}
+        st.markdown(f"• **Dominant gender:** {dom_gender}")
+        st.markdown(f"• **Top buzzing flavour family:** {fast_flav}")
+        if spend_gap:
+            st.markdown(f"• **Median spend gap:** {spend_gap}")
+        st.markdown("The new box‑plot highlights skewness and outliers, guiding premium bundle design and loyalty tiers.")
 
 # =================== 2. TasteDNA TAB ===================
 with taste_tab:
