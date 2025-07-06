@@ -158,18 +158,12 @@ with viz:
     ax.legend(); st.pyplot(fig); plt.close(fig)
 
   # --- NEW box-and-whisker: Monthly Spend by Gender -----------------
-if "monthly_spend_usd" in df.columns:
-    fig, ax = plt.subplots()
-    sns.boxplot(data=df, x="Gender", y="monthly_spend_usd", ax=ax)
-    ax.set_xlabel("Gender")
-    ax.set_ylabel("Monthly Spend (USD)")
-    st.pyplot(fig)
-    plt.close(fig)
-
-    st.caption(
-        "Box-and-whisker shows spend dispersion by gender – helps spot high-value "
-        "segments and outliers for VIP offers."
-    )
+    if "monthly_spend_usd" in df.columns:
+        fig,ax=plt.subplots();sns.boxplot(data=df,x="Gender",y="monthly_spend_usd",ax=ax)
+        ax.set_xlabel("Gender");ax.set_ylabel("Monthly Spend (USD)")
+        st.pyplot(fig);plt.close(fig)
+        st.caption("Box‑and‑whisker shows spending dispersion by gender – pinpoints high‑value segments and outliers for VIP marketing.")
+  
     with st.expander("Key Insights & Rationale"):
     dom_gender = df["Gender"].value_counts(normalize=True).idxmax()
     top_flav   = trends_df.drop(columns="Date").mean().idxmax()
