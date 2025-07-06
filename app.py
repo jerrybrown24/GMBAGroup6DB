@@ -157,12 +157,37 @@ with viz:
     sns.rugplot(df["flavor_boredom"], height=.1, color="r", ax=ax, label="Boredom")
     ax.legend(); st.pyplot(fig); plt.close(fig)
 
-    with st.expander("Key Insights"):
-        dom_gender = df["Gender"].value_counts(normalize=True).idxmax()
-        fast_flav = trends_df.drop(columns="Date").mean().idxmax()
-        st.markdown(f"- Dominant gender in current filters: **{dom_gender}**")
-        st.markdown(f"- Most mentioned flavour family overall: **{fast_flav}**")
-        st.markdown("- Data derived from 7 000 synthetic survey rows + 120‑week user‑based trend signal.")
+  # --- NEW box-and-whisker: Monthly Spend by Gender -----------------
+if "monthly_spend_usd" in df.columns:
+    fig, ax = plt.subplots()
+    sns.boxplot(data=df, x="Gender", y="monthly_spend_usd", ax=ax)
+    ax.set_xlabel("Gender")
+    ax.set_ylabel("Monthly Spend (USD)")
+    st.pyplot(fig)
+    plt.close(fig)
+
+    st.caption(
+        "Box-and-whisker shows spend dispersion by gender – helps spot high-value "
+        "segments and outliers for VIP offers."
+    )
+    with st.expander("Key Insights & Rationale"):
+    dom_gender = df["Gender"].value_counts(normalize=True).idxmax()
+    top_flav   = trends_df.drop(columns="Date").mean().idxmax()
+    median_sp  = (
+        df.groupby("Gender")["monthly_spend_usd"].median()
+        if "monthly_spend_usd" in df.columns else None
+    )
+
+    st.markdown(f"• **Dominant gender:** {dom_gender}")
+    st.markdown(f"• **Hottest flavour family:** {top_flav}")
+
+    if median_sp is not None:
+        st.markdown(f"• **Median monthly spend (USD)** by gender: {median_sp.to_dict()}")
+
+    st.markdown(
+        "Box-plot exposes spend variability and outliers, guiding premium-tier "
+        "bundling and personalised discount thresholds."
+    )
 
 # =================== 2. TasteDNA TAB ===================
 with taste_tab:
@@ -218,6 +243,10 @@ with taste_tab:
     else:  # Clustering
         k = st.slider("k clusters", 2, 10, 4)
         X_scaled = MinMaxScaler().fit_transform(users_df[num_core].fillna(0))
+     # NEW: Elbow method chart
+        ks = range(2,11)
+        inertias = [KMeans(i,random_state=42,n_init='auto').fit(X_scaled).inertia_ for i in ks]
+        fig_elbow,ax_elbow=plt.subplots();ax_elbow.plot(list(ks),inertias,'o-');ax_elbow.set_xlabel("k");ax_elbow.set_ylabel("Inertia");ax_elbow.set_title("Elbow Method for k choice");st.pyplot(fig_elbow);plt.close(fig_elbow)        
         km = KMeans(k, random_state=42, n_init="auto").fit(X_scaled)
         sil = silhouette_score(X_scaled, km.labels_)
         users_df["Cluster"] = km.labels_
