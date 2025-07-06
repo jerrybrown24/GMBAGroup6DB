@@ -1,258 +1,173 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc, mean_absolute_error, mean_squared_error, r2_score
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, RandomForestRegressor, GradientBoostingRegressor
-from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import ElasticNet, LogisticRegression
 from sklearn.cluster import KMeans
-from mlxtend.frequent_patterns import apriori, association_rules
+from sklearn.metrics import silhouette_score
+import umap
+import plotly.express as px
+import networkx as nx
+import itertools
+import pathlib
 
-st.set_page_config(page_title='VaporIQ Analytics', layout='wide')
+DATA_PATH = pathlib.Path(__file__).parent / "data" / "vaporiq_data.csv"
 
-# ----- Styling -----
-st.markdown(
-    """
-    <style>
-        .main {background-color: #f4f2ff;}
-        .reportview-container .markdown-text-container {color:#3c3c3c;}
-        .sidebar .sidebar-content {background-color:#ebe9f7;}
-        footer:after {content:'VaporIQ Dashboard – © 2025';display:block;position:relative;color:#999;padding:5px;text-align:center;}
-    </style>
-    """, unsafe_allow_html=True)
+@st.cache_data
+def load_data():
+    df = pd.read_csv(DATA_PATH)
+    # Basic cleaning: strip spaces in column names
+    df.columns = df.columns.str.strip()
+    return df
 
-# ----- Data Loading -----
-@st.cache_data(show_spinner=False)
-def load_data(path: str):
-    return pd.read_csv(path)
+df = load_data()
 
-DEFAULT_PATH = 'vaporiq_synthetic_v2.csv'
-st.sidebar.header('Dataset')
-data_file = st.sidebar.file_uploader('Upload CSV (optional)', type=['csv'])
-if data_file:
-    df = load_data(data_file)
-else:
-    df = load_data(DEFAULT_PATH)
+st.set_page_config(page_title="VaporIQ Dashboard", layout="wide")
+st.title("🚀 VaporIQ – Hyper‑Personalized Vape Subscription Intelligence")
 
-st.sidebar.success(f'Data rows: {df.shape[0]} | columns: {df.shape[1]}')
+tabs = st.tabs([
+    "Personal Pricing",
+    "Segment Explorer",
+    "Flavor & Mood",
+    "Churn & Referral",
+    "Data‑Trust Console",
+    "Statistical Insights"
+])
 
-# Utility: identify column types
-def get_numeric_cols(data):
-    return data.select_dtypes(include=np.number).columns.tolist()
-
-def get_categorical_cols(data):
-    return [c for c in data.columns if data[c].dtype == 'object' or data[c].nunique() <= 20]
-
-# ----- Tabs -----
-tabs = st.tabs(['Data‑Viz', 'Classification', 'Regression', 'Clustering', 'Association Rules'])
-
-# ---------- Data‑Viz ----------
+# 1. PERSONAL PRICING
 with tabs[0]:
-    st.header('Exploratory Data Visualisation')
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader('Column Distributions')
-        column = st.selectbox('Pick a column', df.columns)
-        if df[column].dtype == 'object':
-            counts = df[column].value_counts().head(20)
-            fig = px.bar(counts, x=counts.index, y=counts.values, labels={'x':column,'y':'count'})
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            fig = px.histogram(df, x=column, nbins=30)
-            st.plotly_chart(fig, use_container_width=True)
-    with col2:
-        st.subheader('Correlation Heatmap')
-        num_cols = get_numeric_cols(df)
-        if len(num_cols) >= 2:
-            corr = df[num_cols].corr()
-            fig = px.imshow(corr, text_auto=True)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info('Not enough numeric columns.')
+    st.header("💸 Personal Pricing")
+    target = "willingness_to_pay_usd"
+    num_cols = ["age", "weekly_consumption_ml", "nicotine_strength_mgml", "monthly_spend_usd"]
+    cat_cols = ["country", "device_type", "primary_vape_motivation"]
+    df_mod = df.dropna(subset=[target])
 
-# ---------- Classification ----------
+    X = df_mod[num_cols + cat_cols]
+    y = df_mod[target]
+    pre = ColumnTransformer([
+        ("num", StandardScaler(), num_cols),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols)
+    ])
+    model = Pipeline([
+        ("pre", pre),
+        ("reg", ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42))
+    ])
+    model.fit(X, y)
+
+    st.subheader("Predict user price ceiling")
+    sample = {}
+    for c in num_cols:
+        sample[c] = st.number_input(c, float(df[c].min()), float(df[c].max()), float(df[c].mean()))
+    for c in cat_cols:
+        sample[c] = st.selectbox(c, sorted(df[c].dropna().unique()))
+
+    if st.button("Predict"):
+        pred = model.predict(pd.DataFrame([sample]))[0]
+        st.metric("Estimated willingness to pay (USD)", f"{pred:,.2f}")
+
+# 2. SEGMENT EXPLORER
 with tabs[1]:
-    st.header('Classification Models')
-    target_options = [c for c in df.columns if df[c].nunique() <= 10]
-    if not target_options:
-        st.warning('No categorical/binary target found with ≤10 unique values.')
-    else:
-        target = st.selectbox('Target', target_options, key='clf_target')
-        feature_candidates = [c for c in df.columns if c != target]
-        predictors = st.multiselect('Predictor features', feature_candidates, default=feature_candidates[:5], key='clf_feats')
-        test_size = st.slider('Test size (%%)', 10, 40, 20, key='clf_split')/100
-        grid_toggle = st.checkbox('Enable GridSearchCV (may be slow)', value=False, key='gs')
+    st.header("🔍 Segment Explorer")
+    seg_cols = ["age", "weekly_consumption_ml", "monthly_spend_usd", "willingness_to_pay_usd"]
+    numeric = df[seg_cols].fillna(df[seg_cols].median())
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(numeric)
 
-        X = pd.get_dummies(df[predictors], drop_first=True)
-        y = df[target]
+    # UMAP dimensionality reduction
+    reducer = umap.UMAP(random_state=42)
+    X_umap = reducer.fit_transform(X_scaled)
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
+    k = st.slider("Choose number of clusters", 2, 8, 4)
+    kmeans = KMeans(n_clusters=k, random_state=42, n_init="auto")
+    clusters = kmeans.fit_predict(X_scaled)
+    sil = silhouette_score(X_scaled, clusters)
+    st.write(f"Silhouette score: {sil:.2f}")
 
-        models = {
-            'KNN': KNeighborsClassifier(),
-            'DecisionTree': DecisionTreeClassifier(random_state=42),
-            'RandomForest': RandomForestClassifier(random_state=42),
-            'GBRT': GradientBoostingClassifier(random_state=42)
-        }
-        param_grids = {
-            'KNN': {'n_neighbors':[3,5,7]},
-            'DecisionTree': {'max_depth':[None,5,10]},
-            'RandomForest': {'n_estimators':[100,200], 'max_depth':[None,10]},
-            'GBRT': {'n_estimators':[100,200], 'learning_rate':[0.05,0.1]}
-        }
+    umap_df = pd.DataFrame(dict(UMAP1=X_umap[:,0], UMAP2=X_umap[:,1], cluster=clusters.astype(str)))
+    fig = px.scatter(umap_df, x="UMAP1", y="UMAP2", color="cluster", title="UMAP projection of user segments")
+    st.plotly_chart(fig, use_container_width=True)
 
-        results = []
-        roc_data = []
-
-        for name, model in models.items():
-            if grid_toggle:
-                grid = GridSearchCV(model, param_grids[name], cv=3, scoring='f1_weighted', n_jobs=-1)
-                grid.fit(X_train, y_train)
-                best = grid.best_estimator_
-            else:
-                best = model.fit(X_train, y_train)
-
-            y_pred = best.predict(X_test)
-            row = {
-                'Model':name,
-                'Accuracy':accuracy_score(y_test, y_pred),
-                'Precision':precision_score(y_test, y_pred, average='weighted', zero_division=0),
-                'Recall':recall_score(y_test, y_pred, average='weighted', zero_division=0),
-                'F1':f1_score(y_test, y_pred, average='weighted', zero_division=0)
-            }
-            results.append(row)
-
-            # ROC only for binary targets
-            if y.nunique() == 2:
-                if hasattr(best, 'predict_proba'):
-                    proba = best.predict_proba(X_test)[:,1]
-                else:
-                    proba = best.decision_function(X_test)
-                fpr, tpr, _ = roc_curve(y_test, proba)
-                roc_auc = auc(fpr,tpr)
-                roc_data.append((name, fpr, tpr, roc_auc))
-
-        st.subheader('Metrics')
-        st.dataframe(pd.DataFrame(results).set_index('Model').style.format('{:.3f}'))
-
-        if y.nunique() == 2 and roc_data:
-            st.subheader('ROC Curves')
-            fig = go.Figure()
-            for name, fpr, tpr, roc_auc in roc_data:
-                fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=f'{name} (AUC {roc_auc:.2f})'))
-            fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', line=dict(dash='dash'), showlegend=False))
-            fig.update_layout(xaxis_title='False Positive Rate', yaxis_title='True Positive Rate')
-            st.plotly_chart(fig, use_container_width=True)
-
-# ---------- Regression ----------
+# 3. FLAVOR & MOOD
 with tabs[2]:
-    st.header('Regression Models')
-    numeric_cols = get_numeric_cols(df)
-    if len(numeric_cols) < 2:
-        st.info('Need at least 2 numeric columns.')
-    else:
-        target_reg = st.selectbox('Numeric target', numeric_cols, key='reg_target')
-        reg_features = st.multiselect('Predictors', [c for c in numeric_cols if c != target_reg], default=[c for c in numeric_cols if c != target_reg][:5], key='reg_feats')
-        test_size_reg = st.slider('Test size (%%)', 10, 40, 20, key='reg_split')/100
+    st.header("🎨 Flavor & Mood Pairing")
+    from mlxtend.frequent_patterns import apriori, association_rules
 
-        Xr = df[reg_features]
-        yr = df[target_reg]
-        Xr_train, Xr_test, yr_train, yr_test = train_test_split(Xr, yr, test_size=test_size_reg, random_state=42)
+    # Transform ranked flavor list into one‑hot columns
+    flavor_lists = df["fav_flavor_categories_ranked"].fillna("").apply(lambda x: [f.strip() for f in x.split(",") if f.strip()])
+    all_flavors = sorted({f for sub in flavor_lists for f in sub})
+    flavor_df = pd.DataFrame([{flav: (flav in lst) for flav in all_flavors} for lst in flavor_lists])
 
-        regs = {
-            'Linear': LinearRegression(),
-            'RandomForest': RandomForestRegressor(random_state=42),
-            'GBRT': GradientBoostingRegressor(random_state=42)
-        }
-        reg_results = []
-        for name, reg in regs.items():
-            reg.fit(Xr_train, yr_train)
-            preds = reg.predict(Xr_test)
-            reg_results.append({
-                'Model': name,
-                'R2': r2_score(yr_test, preds),
-                'MAE': mean_absolute_error(yr_test, preds),
-                'RMSE': mean_squared_error(yr_test, preds, squared=False)
-            })
+    freq_items = apriori(flavor_df, min_support=0.05, use_colnames=True)
+    rules = association_rules(freq_items, metric="lift", min_threshold=1.0).sort_values("lift", ascending=False).head(20)
 
-        st.subheader('Metrics')
-        st.dataframe(pd.DataFrame(reg_results).set_index('Model').style.format('{:.3f}'))
+    st.subheader("Top association rules (support ≥ 5 %)")
+    st.dataframe(rules[["antecedents", "consequents", "support", "confidence", "lift"]])
 
-        selected_model = st.selectbox('Plot predictions for', list(regs.keys()), key='pred_plot')
-        model_obj = regs[selected_model]
-        preds_full = model_obj.predict(Xr)
-        fig2 = px.scatter(x=yr, y=preds_full, labels={'x':'Actual','y':'Predicted'}, trendline='ols')
-        fig2.update_traces(marker={'opacity':0.6})
-        st.plotly_chart(fig2, use_container_width=True)
-
-# ---------- Clustering ----------
+# 4. CHURN & REFERRAL
 with tabs[3]:
-    st.header('K‑Means Clustering')
-    cat_cols = get_categorical_cols(df)
-    num_cols = get_numeric_cols(df)
-    selected_cols = st.multiselect('Pick features (numeric & one‑hot encoded)', df.columns, default=num_cols[:3]+cat_cols[:1], key='clus_feats')
-    if selected_cols:
-        data_clu = pd.get_dummies(df[selected_cols], drop_first=True)
-        scaler = StandardScaler()
-        data_scaled = scaler.fit_transform(data_clu)
+    st.header("⚠️ Churn & Referral Radar")
+    churn_target = "overall_interest_nps"
+    churn_df = df.dropna(subset=[churn_target])
+    churn_df["promoter"] = (churn_df[churn_target] >= 9).astype(int)
 
-        k_range = st.slider('Max k for elbow', 2, 15, 10, key='k_max')
-        distortions = []
-        Ks = range(1, k_range+1)
-        for k in Ks:
-            km = KMeans(n_clusters=k, random_state=42, n_init='auto')
-            km.fit(data_scaled)
-            distortions.append(km.inertia_)
+    features = ["interest_gamification_points", "likelihood_refer_friends",
+                "flavor_boredom", "freq_seek_recommendations"]
+    X = churn_df[features].fillna(0)
+    y = churn_df["promoter"]
 
-        fig3 = px.line(x=list(Ks), y=distortions, markers=True, labels={'x':'k','y':'Inertia'})
-        st.plotly_chart(fig3, use_container_width=True)
+    clf = LogisticRegression(max_iter=500)
+    clf.fit(X, y)
 
-        k_choose = st.number_input('Choose k to cluster', min_value=2, max_value=k_range, value=3, step=1, key='k_choose')
-        km_final = KMeans(n_clusters=int(k_choose), random_state=42, n_init='auto').fit(data_scaled)
-        st.subheader('Cluster Counts')
-        st.write(pd.Series(km_final.labels_).value_counts().rename('count'))
+    st.subheader("Predict promoter probability")
+    user_input = {f: st.slider(f, 0, 10, 5) for f in features}
+    proba = clf.predict_proba(pd.DataFrame([user_input]))[0,1]
+    st.metric("Promoter probability", f"{proba:.2%}")
 
-# ---------- Association Rules ----------
+# 5. DATA‑TRUST CONSOLE
 with tabs[4]:
-    st.header('Association Rule Mining')
-    list_like_cols = ['fav_flavor_categories_ranked','top_subscription_value_ranked','cancel_triggers_open']
-    present_cols = [c for c in list_like_cols if c in df.columns]
-    if not present_cols:
-        st.warning('No list‑like columns found.')
-    else:
-        st.write('Using columns:', ', '.join(present_cols))
-        # Build transaction list
-        transactions = []
-        for _, row in df[present_cols].iterrows():
-            items = []
-            for c in present_cols:
-                val = row[c]
-                if pd.isna(val):
-                    continue
-                if isinstance(val, str):
-                    items.extend([i.strip() for i in val.split(',') if i.strip()])
-            transactions.append(items)
+    st.header("🔒 Data‑Trust Console")
+    trust_cols = ["comfort_sharing_data", "share_mood_data_comfort", "importance_data_control"]
+    trust_df = df[trust_cols].fillna(df[trust_cols].median())
+    scaler = StandardScaler()
+    trust_scaled = scaler.fit_transform(trust_df)
 
-        # One‑hot encode
-        from mlxtend.preprocessing import TransactionEncoder
-        te = TransactionEncoder()
-        te_ary = te.fit(transactions).transform(transactions)
-        trans_df = pd.DataFrame(te_ary, columns=te.columns_)
+    k_trust = 3
+    kmeans_trust = KMeans(n_clusters=k_trust, random_state=42, n_init="auto").fit(trust_scaled)
+    trust_labels = kmeans_trust.labels_
+    df["trust_tier"] = trust_labels
 
-        min_support = st.slider('Min support', 0.01, 0.5, 0.05, 0.01)
-        freq = apriori(trans_df, min_support=min_support, use_colnames=True)
-        if freq.empty:
-            st.info('No frequent itemsets at this support.')
-        else:
-            min_conf = st.slider('Min confidence', 0.1, 1.0, 0.3, 0.05)
-            min_lift = st.slider('Min lift', 1.0, 10.0, 1.2, 0.1)
-            rules = association_rules(freq, metric='confidence', min_threshold=min_conf)
-            rules = rules[rules['lift'] >= min_lift]
-            st.dataframe(rules[['antecedents','consequents','support','confidence','lift']].sort_values('lift', ascending=False).head(50))
+    count_tiers = df["trust_tier"].value_counts().sort_index()
+    st.bar_chart(count_tiers)
+    st.write("Tier 0 = low trust, Tier 1 = medium, Tier 2 = high")
+
+# 6. STATISTICAL INSIGHTS
+with tabs[5]:
+    st.header("📊 Statistical Insights")
+    st.write("Top‑10 quick graphs")
+
+    graphs = []
+    # 1. Age distribution
+    graphs.append(px.histogram(df, x="age", nbins=20, title="Age distribution"))
+    # 2. Monthly spend vs. willingness
+    graphs.append(px.scatter(df, x="monthly_spend_usd", y="willingness_to_pay_usd", trendline="ols", title="Spend vs. Willingness to Pay"))
+    # 3. Flavor boredom vs. openness
+    graphs.append(px.scatter(df, x="flavor_boredom", y="openness_new_flavors", title="Boredom vs. Openness"))
+    # 4. Nicotine strength histogram
+    graphs.append(px.histogram(df, x="nicotine_strength_mgml", title="Nicotine strength"))
+    # 5. Device type pie
+    graphs.append(px.pie(df, names="device_type", title="Device types"))
+    # 6. Weekly consumption histogram
+    graphs.append(px.histogram(df, x="weekly_consumption_ml", title="Weekly consumption (ml)"))
+    # 7. Referral likelihood distribution
+    graphs.append(px.histogram(df, x="likelihood_refer_friends", title="Referral likelihood"))
+    # 8. Mood spectrum pie
+    graphs.append(px.pie(df, names="self_report_mood_spectrum", title="Mood spectrum"))
+    # 9. Box size vs. spend
+    graphs.append(px.box(df, x="preferred_box_size_pods", y="monthly_spend_usd", title="Spend by Box Size"))
+    # 10. Peak time bar
+    graphs.append(px.histogram(df, x="peak_vape_time", title="Peak vape times"))
+
+    for fig in graphs:
+        st.plotly_chart(fig, use_container_width=True)
