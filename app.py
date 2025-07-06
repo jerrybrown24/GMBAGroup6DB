@@ -1,201 +1,258 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import plotly.express as px
-from io import BytesIO
-
+import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split, GridSearchCV
-from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler
-from sklearn.metrics import (accuracy_score, precision_score, recall_score,
-                             f1_score, roc_curve, auc, confusion_matrix,
-                             silhouette_score, r2_score, mean_squared_error,
-                             mean_absolute_error)
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc, mean_absolute_error, mean_squared_error, r2_score
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.cluster import KMeans
-from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from mlxtend.frequent_patterns import apriori, association_rules
 
-# ---------------------------
-# Helper functions
-# ---------------------------
-@st.cache_data
-def load_data(src: str):
-    """Load CSV from local path or GitHub RAW URL."""
-    return pd.read_csv(src)
+st.set_page_config(page_title='VaporIQ Analytics', layout='wide')
 
-def train_classifiers(df, target):
-    X = df.drop(columns=[target])
-    y = df[target]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42)
-    scaler = StandardScaler().fit(X_train)
-    X_train, X_test = scaler.transform(X_train), scaler.transform(X_test)
-    models = {
-        "KNN": KNeighborsClassifier(),
-        "Decision Tree": DecisionTreeClassifier(random_state=42),
-        "Random Forest": RandomForestClassifier(n_estimators=200, random_state=42),
-        "GBRT": GradientBoostingClassifier(random_state=42)
-    }
-    metrics, rocs, cms = [], {}, {}
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        pred = model.predict(X_test)
-        prob = model.predict_proba(X_test)[:,1] if hasattr(model, 'predict_proba') else None
-        metrics.append(dict(Model=name,
-                            Accuracy=accuracy_score(y_test,pred),
-                            Precision=precision_score(y_test,pred,zero_division=0),
-                            Recall=recall_score(y_test,pred,zero_division=0),
-                            F1=f1_score(y_test,pred,zero_division=0)))
-        cms[name]=confusion_matrix(y_test,pred)
-        if prob is not None:
-            fpr,tpr,_=roc_curve(y_test,prob)
-            rocs[name]=(fpr,tpr,auc(fpr,tpr))
-    return pd.DataFrame(metrics), rocs, cms, scaler, models
+# ----- Styling -----
+st.markdown(
+    """
+    <style>
+        .main {background-color: #f4f2ff;}
+        .reportview-container .markdown-text-container {color:#3c3c3c;}
+        .sidebar .sidebar-content {background-color:#ebe9f7;}
+        footer:after {content:'VaporIQ Dashboard – © 2025';display:block;position:relative;color:#999;padding:5px;text-align:center;}
+    </style>
+    """, unsafe_allow_html=True)
 
-def kmeans_cluster(df, features, k):
-    X = df[features].dropna()
-    X_scaled = StandardScaler().fit_transform(X)
-    km = KMeans(n_clusters=k, n_init='auto', random_state=42)
-    labels = km.fit_predict(X_scaled)
-    inertia = km.inertia_
-    sil = silhouette_score(X_scaled, labels)
-    df_out = df.loc[X.index].copy()
-    df_out['cluster'] = labels
-    centers = pd.DataFrame(km.cluster_centers_, columns=features)
-    return df_out, inertia, sil, centers
+# ----- Data Loading -----
+@st.cache_data(show_spinner=False)
+def load_data(path: str):
+    return pd.read_csv(path)
 
-def association_rules_top(df, cols, min_sup, min_conf):
-    basket = pd.DataFrame()
-    for c in cols:
-        basket = pd.concat([basket, df[c].str.get_dummies(sep=',')], axis=1)
-    basket = basket.groupby(level=0, axis=1).max()
-    freq = apriori(basket, min_support=min_sup, use_colnames=True)
-    rules = association_rules(freq, metric='confidence', min_threshold=min_conf)
-    return rules.sort_values('confidence', ascending=False).head(10)
+DEFAULT_PATH = 'vaporiq_synthetic_v2.csv'
+st.sidebar.header('Dataset')
+data_file = st.sidebar.file_uploader('Upload CSV (optional)', type=['csv'])
+if data_file:
+    df = load_data(data_file)
+else:
+    df = load_data(DEFAULT_PATH)
 
-def train_regressors(df, target, scaler_choice='robust'):
-    X = df.drop(columns=[target])
-    y = df[target]
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42)
-    scaler = RobustScaler() if scaler_choice=='robust' else MinMaxScaler()
-    X_train, X_test = scaler.fit_transform(X_train), scaler.transform(X_test)
-    models = {
-        "Linear": LinearRegression(),
-        "Ridge": Ridge(),
-        "Lasso": Lasso(),
-        "Decision Tree": DecisionTreeRegressor(random_state=42)
-    }
-    grids = {"Ridge":{"alpha":[0.1,1,10]},
-             "Lasso":{"alpha":[0.001,0.01,0.1]},
-             "Decision Tree":{"max_depth":[None,5,10,20]}}
-    results, tuned = [], {}
-    for name, model in models.items():
-        if name in grids:
-            gs = GridSearchCV(model, grids[name], cv=5, scoring='r2').fit(X_train,y_train)
-            best = gs.best_estimator_
-        else:
-            best = model.fit(X_train,y_train)
-        tuned[name]=best
-        pred = best.predict(X_test)
-        results.append(dict(Model=name,
-                            R2=r2_score(y_test,pred),
-                            RMSE=mean_squared_error(y_test,pred,squared=False),
-                            MAE=mean_absolute_error(y_test,pred)))
-    return pd.DataFrame(results), tuned, scaler
+st.sidebar.success(f'Data rows: {df.shape[0]} | columns: {df.shape[1]}')
 
-# ---------------------------
-# Streamlit UI
-# ---------------------------
-st.set_page_config(page_title="VaporIQ Dashboard", layout="wide")
-st.title("📊 VaporIQ Analytics (All‑in‑One)")
+# Utility: identify column types
+def get_numeric_cols(data):
+    return data.select_dtypes(include=np.number).columns.tolist()
 
-# Data source
-st.sidebar.header("Data")
-csv_src = st.sidebar.text_input("CSV path / RAW URL", "vaporiq_synthetic.csv")
-df = load_data(csv_src)
-st.sidebar.success(f"Loaded {df.shape[0]:,} rows.")
+def get_categorical_cols(data):
+    return [c for c in data.columns if data[c].dtype == 'object' or data[c].nunique() <= 20]
 
-# Tabs
-tabs = st.tabs(["Classification","Clustering","Association Rules","Regression","Data Viz"])
+# ----- Tabs -----
+tabs = st.tabs(['Data‑Viz', 'Classification', 'Regression', 'Clustering', 'Association Rules'])
 
-# ----- Classification -----
+# ---------- Data‑Viz ----------
 with tabs[0]:
-    st.header("🧩 Classification")
-    targets = [c for c in df.columns if df[c].nunique()<=10 and df[c].dtype!='object']
-    target = st.selectbox("Target label", targets)
-    if st.button("Train models"):
-        met, rocs, cms, scaler, fitted = train_classifiers(df, target)
-        st.dataframe(met.style.format({"Accuracy":"{:.2%}","Precision":"{:.2%}",
-                                       "Recall":"{:.2%}","F1":"{:.2%}"}))
-        fig, ax = plt.subplots()
-        for n,(fpr,tpr,aucv) in rocs.items():
-            ax.plot(fpr,tpr,label=f"{n} (AUC={aucv:.2f})")
-        ax.plot([0,1],[0,1],'k--'); ax.set_xlabel("FPR"); ax.set_ylabel("TPR"); ax.legend()
-        st.pyplot(fig)
-        algo = st.selectbox("Confusion matrix for:", list(cms.keys()))
-        if algo:
-            st.dataframe(pd.DataFrame(cms[algo], index=["True 0","True 1"],
-                                       columns=["Pred 0","Pred 1"]))
-    st.subheader("Batch prediction")
-    up = st.file_uploader("Upload unlabeled CSV")
-    if up:
-        nd = pd.read_csv(up)
-        alg = st.selectbox("Predict with model:", list(fitted.keys()))
-        if st.button("Predict"):
-            nd["prediction"] = fitted[alg].predict(scaler.transform(nd))
-            buf = BytesIO(); nd.to_csv(buf,index=False)
-            st.download_button("Download predictions", buf.getvalue(), "predictions.csv")
+    st.header('Exploratory Data Visualisation')
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader('Column Distributions')
+        column = st.selectbox('Pick a column', df.columns)
+        if df[column].dtype == 'object':
+            counts = df[column].value_counts().head(20)
+            fig = px.bar(counts, x=counts.index, y=counts.values, labels={'x':column,'y':'count'})
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            fig = px.histogram(df, x=column, nbins=30)
+            st.plotly_chart(fig, use_container_width=True)
+    with col2:
+        st.subheader('Correlation Heatmap')
+        num_cols = get_numeric_cols(df)
+        if len(num_cols) >= 2:
+            corr = df[num_cols].corr()
+            fig = px.imshow(corr, text_auto=True)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info('Not enough numeric columns.')
 
-# ----- Clustering -----
+# ---------- Classification ----------
 with tabs[1]:
-    st.header("👥 Clustering")
-    numcols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    feats = st.multiselect("Features", numcols, default=numcols[:3])
-    k = st.slider("k clusters", 2, 10, 4)
-    if st.button("Run K‑Means"):
-        dc, inertia, sil, centers = kmeans_cluster(df, feats, k)
-        st.write(f"SSE: {inertia:.0f} | Silhouette: {sil:.2f}")
-        st.dataframe(centers)
-        st.dataframe(dc.groupby('cluster')[feats].mean())
-        buf=BytesIO(); dc.to_csv(buf,index=False)
-        st.download_button("Download labeled data", buf.getvalue(), "clusters.csv")
+    st.header('Classification Models')
+    target_options = [c for c in df.columns if df[c].nunique() <= 10]
+    if not target_options:
+        st.warning('No categorical/binary target found with ≤10 unique values.')
+    else:
+        target = st.selectbox('Target', target_options, key='clf_target')
+        feature_candidates = [c for c in df.columns if c != target]
+        predictors = st.multiselect('Predictor features', feature_candidates, default=feature_candidates[:5], key='clf_feats')
+        test_size = st.slider('Test size (%%)', 10, 40, 20, key='clf_split')/100
+        grid_toggle = st.checkbox('Enable GridSearchCV (may be slow)', value=False, key='gs')
 
-# ----- Association -----
+        X = pd.get_dummies(df[predictors], drop_first=True)
+        y = df[target]
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=42, stratify=y)
+
+        models = {
+            'KNN': KNeighborsClassifier(),
+            'DecisionTree': DecisionTreeClassifier(random_state=42),
+            'RandomForest': RandomForestClassifier(random_state=42),
+            'GBRT': GradientBoostingClassifier(random_state=42)
+        }
+        param_grids = {
+            'KNN': {'n_neighbors':[3,5,7]},
+            'DecisionTree': {'max_depth':[None,5,10]},
+            'RandomForest': {'n_estimators':[100,200], 'max_depth':[None,10]},
+            'GBRT': {'n_estimators':[100,200], 'learning_rate':[0.05,0.1]}
+        }
+
+        results = []
+        roc_data = []
+
+        for name, model in models.items():
+            if grid_toggle:
+                grid = GridSearchCV(model, param_grids[name], cv=3, scoring='f1_weighted', n_jobs=-1)
+                grid.fit(X_train, y_train)
+                best = grid.best_estimator_
+            else:
+                best = model.fit(X_train, y_train)
+
+            y_pred = best.predict(X_test)
+            row = {
+                'Model':name,
+                'Accuracy':accuracy_score(y_test, y_pred),
+                'Precision':precision_score(y_test, y_pred, average='weighted', zero_division=0),
+                'Recall':recall_score(y_test, y_pred, average='weighted', zero_division=0),
+                'F1':f1_score(y_test, y_pred, average='weighted', zero_division=0)
+            }
+            results.append(row)
+
+            # ROC only for binary targets
+            if y.nunique() == 2:
+                if hasattr(best, 'predict_proba'):
+                    proba = best.predict_proba(X_test)[:,1]
+                else:
+                    proba = best.decision_function(X_test)
+                fpr, tpr, _ = roc_curve(y_test, proba)
+                roc_auc = auc(fpr,tpr)
+                roc_data.append((name, fpr, tpr, roc_auc))
+
+        st.subheader('Metrics')
+        st.dataframe(pd.DataFrame(results).set_index('Model').style.format('{:.3f}'))
+
+        if y.nunique() == 2 and roc_data:
+            st.subheader('ROC Curves')
+            fig = go.Figure()
+            for name, fpr, tpr, roc_auc in roc_data:
+                fig.add_trace(go.Scatter(x=fpr, y=tpr, mode='lines', name=f'{name} (AUC {roc_auc:.2f})'))
+            fig.add_trace(go.Scatter(x=[0,1], y=[0,1], mode='lines', line=dict(dash='dash'), showlegend=False))
+            fig.update_layout(xaxis_title='False Positive Rate', yaxis_title='True Positive Rate')
+            st.plotly_chart(fig, use_container_width=True)
+
+# ---------- Regression ----------
 with tabs[2]:
-    st.header("🔗 Association Rules")
-    basket_cols = [c for c in df.columns if df[c].astype(str).str.contains(',').any()]
-    chos = st.multiselect("Basket columns", basket_cols, default=basket_cols[:2])
-    ms = st.slider("Min support",0.01,0.2,0.05,0.01)
-    mc = st.slider("Min confidence",0.1,0.9,0.3,0.05)
-    if st.button("Run Apriori"):
-        rules = association_rules_top(df, chos, ms, mc)
-        st.dataframe(rules)
+    st.header('Regression Models')
+    numeric_cols = get_numeric_cols(df)
+    if len(numeric_cols) < 2:
+        st.info('Need at least 2 numeric columns.')
+    else:
+        target_reg = st.selectbox('Numeric target', numeric_cols, key='reg_target')
+        reg_features = st.multiselect('Predictors', [c for c in numeric_cols if c != target_reg], default=[c for c in numeric_cols if c != target_reg][:5], key='reg_feats')
+        test_size_reg = st.slider('Test size (%%)', 10, 40, 20, key='reg_split')/100
 
-# ----- Regression -----
+        Xr = df[reg_features]
+        yr = df[target_reg]
+        Xr_train, Xr_test, yr_train, yr_test = train_test_split(Xr, yr, test_size=test_size_reg, random_state=42)
+
+        regs = {
+            'Linear': LinearRegression(),
+            'RandomForest': RandomForestRegressor(random_state=42),
+            'GBRT': GradientBoostingRegressor(random_state=42)
+        }
+        reg_results = []
+        for name, reg in regs.items():
+            reg.fit(Xr_train, yr_train)
+            preds = reg.predict(Xr_test)
+            reg_results.append({
+                'Model': name,
+                'R2': r2_score(yr_test, preds),
+                'MAE': mean_absolute_error(yr_test, preds),
+                'RMSE': mean_squared_error(yr_test, preds, squared=False)
+            })
+
+        st.subheader('Metrics')
+        st.dataframe(pd.DataFrame(reg_results).set_index('Model').style.format('{:.3f}'))
+
+        selected_model = st.selectbox('Plot predictions for', list(regs.keys()), key='pred_plot')
+        model_obj = regs[selected_model]
+        preds_full = model_obj.predict(Xr)
+        fig2 = px.scatter(x=yr, y=preds_full, labels={'x':'Actual','y':'Predicted'}, trendline='ols')
+        fig2.update_traces(marker={'opacity':0.6})
+        st.plotly_chart(fig2, use_container_width=True)
+
+# ---------- Clustering ----------
 with tabs[3]:
-    st.header("📈 Regression")
-    numcols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-    tgt = st.selectbox("Numeric target", numcols, index=numcols.index("monthly_spend_usd") if "monthly_spend_usd" in numcols else 0)
-    scaler_opt = st.radio("Scaler", ["robust","minmax"], horizontal=True)
-    if st.button("Train regressors"):
-        res, models, scalerR = train_regressors(df[numcols].dropna(), tgt, scaler_opt)
-        st.dataframe(res.style.format({"R2":"{:.2f}","RMSE":"{:.1f}","MAE":"{:.1f}"}))
-        best = res.iloc[0]["Model"]
-        X = df[numcols].drop(columns=[tgt])
-        y = df[tgt]
-        y_pred = models[best].predict(scalerR.transform(X))
-        fig = px.scatter(x=y, y=y_pred, labels={"x":"Actual","y":"Predicted"}, trendline="ols")
-        st.plotly_chart(fig, use_container_width=True)
+    st.header('K‑Means Clustering')
+    cat_cols = get_categorical_cols(df)
+    num_cols = get_numeric_cols(df)
+    selected_cols = st.multiselect('Pick features (numeric & one‑hot encoded)', df.columns, default=num_cols[:3]+cat_cols[:1], key='clus_feats')
+    if selected_cols:
+        data_clu = pd.get_dummies(df[selected_cols], drop_first=True)
+        scaler = StandardScaler()
+        data_scaled = scaler.fit_transform(data_clu)
 
-# ----- Data Viz -----
+        k_range = st.slider('Max k for elbow', 2, 15, 10, key='k_max')
+        distortions = []
+        Ks = range(1, k_range+1)
+        for k in Ks:
+            km = KMeans(n_clusters=k, random_state=42, n_init='auto')
+            km.fit(data_scaled)
+            distortions.append(km.inertia_)
+
+        fig3 = px.line(x=list(Ks), y=distortions, markers=True, labels={'x':'k','y':'Inertia'})
+        st.plotly_chart(fig3, use_container_width=True)
+
+        k_choose = st.number_input('Choose k to cluster', min_value=2, max_value=k_range, value=3, step=1, key='k_choose')
+        km_final = KMeans(n_clusters=int(k_choose), random_state=42, n_init='auto').fit(data_scaled)
+        st.subheader('Cluster Counts')
+        st.write(pd.Series(km_final.labels_).value_counts().rename('count'))
+
+# ---------- Association Rules ----------
 with tabs[4]:
-    st.header("🖼️ Data Visualisation Insights")
-    fig1 = px.box(df, x="flavor_boredom", y="monthly_spend_usd")
-    st.plotly_chart(fig1, use_container_width=True)
-    fig2 = px.histogram(df, x="nicotine_strength_mgml", color="intend_reduce_nicotine", barmode="overlay")
-    st.plotly_chart(fig2, use_container_width=True)
-    st.markdown("Add up to 10 complex insights here…")
+    st.header('Association Rule Mining')
+    list_like_cols = ['fav_flavor_categories_ranked','top_subscription_value_ranked','cancel_triggers_open']
+    present_cols = [c for c in list_like_cols if c in df.columns]
+    if not present_cols:
+        st.warning('No list‑like columns found.')
+    else:
+        st.write('Using columns:', ', '.join(present_cols))
+        # Build transaction list
+        transactions = []
+        for _, row in df[present_cols].iterrows():
+            items = []
+            for c in present_cols:
+                val = row[c]
+                if pd.isna(val):
+                    continue
+                if isinstance(val, str):
+                    items.extend([i.strip() for i in val.split(',') if i.strip()])
+            transactions.append(items)
+
+        # One‑hot encode
+        from mlxtend.preprocessing import TransactionEncoder
+        te = TransactionEncoder()
+        te_ary = te.fit(transactions).transform(transactions)
+        trans_df = pd.DataFrame(te_ary, columns=te.columns_)
+
+        min_support = st.slider('Min support', 0.01, 0.5, 0.05, 0.01)
+        freq = apriori(trans_df, min_support=min_support, use_colnames=True)
+        if freq.empty:
+            st.info('No frequent itemsets at this support.')
+        else:
+            min_conf = st.slider('Min confidence', 0.1, 1.0, 0.3, 0.05)
+            min_lift = st.slider('Min lift', 1.0, 10.0, 1.2, 0.1)
+            rules = association_rules(freq, metric='confidence', min_threshold=min_conf)
+            rules = rules[rules['lift'] >= min_lift]
+            st.dataframe(rules[['antecedents','consequents','support','confidence','lift']].sort_values('lift', ascending=False).head(50))
